@@ -1,0 +1,231 @@
+# Secure CI/CD pipeline
+
+This repository contains Terraform modules and example configurations to enable Google Cloud customers to quickly deploy a secure CI/CD pipeline, implementing many of the functions outlined in the [Shifting Left on Security](https://cloud.google.com/solutions/shifting-left-on-security) report.
+
+The Terraform modules in this repository provide an opinionated architecture that incorporates and documents best practices for secure application delivery architecture.
+
+### Tagline
+Create a CI/CD pipeline that follows security best practices.
+
+### Detailed
+Set up a secure CI/CD pipeline that follows best practices for building, scanning, storing, and deploying containers to GKE, Anthos, or Cloud Run.
+Set up a secure CI/CD pipeline that follows best practices for building, scanning, storing, and deploying containers to GKE, Anthos, or Cloud Run.
+You can choose whether to deploy your solution through the console directly or download as Terraform from GitHub to deploy later.
+
+### Architecture
+1. A developer pushes new code or a code change for a container-based application to a Source Repository (GitHub or GitLab).
+1. The code push invokes a Cloud Build trigger. The Cloud Build trigger starts a build in a Cloud Build private worker pool that's hosted in a customer-managed VPC. The outputs of the build are metadata files, Cloud Build logs, and containers.
+1. The metadata files and the Cloud Build logs are stored in a Cloud Storage bucket.
+1. The pipeline runs security scans (which you configure) and validates the container structure. When the scans and structure pass, the containers are stored in Artifact Registry.
+1. The Cloud Build trigger requests an attestation from Binary Authorization that certifies that the required scans passed. The attestation is stored as a cryptographic signature in Binary Authorization.
+1. The Cloud Build trigger starts a Cloud Deploy release to roll out the containers to the three environments: developer (Dev), QA, and production (Prod). Each environment is one Kubernetes cluster in its own subnet. All three clusters and subnets are in the same GKE VPC. The last cluster is the production environment.
+1. As the rollout starts, Cloud Deploy sends the containers to the developer environment. Google Kubernetes Engine (GKE) uses the policy that's defined for the cluster to check the containers’ build attestation in Binary Authorization. When this check passes, GKE deploys the containers into the Kubernetes cluster.
+1. When Cloud Deploy releases the containers to the developer environment, Cloud Deploy sends a Pub/Sub message that starts the second Cloud Build trigger. This Cloud Build trigger runs post-deployment tests (which you configure) in the developer environment. To run these tests, Cloud Build worker pools communicate with the clusters using Connect Gateway.
+1. When the post-deployment checks succeed, the Cloud Build trigger requests an attestation from Binary Authorization. The attestation certifies that the required tests from the developer environment passed.
+1. Cloud Deploy promotes the release to the second Kubernetes cluster for the QA environment. Steps 7 to 9 run again with some differences: GKE checks for the two attestations before deploying, and after the tests pass, the quality attestation is created.
+1. Cloud Deploy promotes the release to the production environment, which is the third Kubernetes cluster. GKE uses a policy to check for all three attestations in Binary Authorization. When this check passes, GKE deploys the containers in the Kubernetes cluster for the production environment.
+
+## Documentation
+- [Architecture Diagram](https://github.com/GoogleCloudPlatform/terraform-google-secure-cicd/blob/main/assets/secure_cicd_pipeline_v2.svg)
+
+## Usage
+
+Basic usage of this module is as follows:
+
+```hcl
+# Secure-CI
+module "ci_pipeline" {
+  source                  = "GoogleCloudPlatform/secure-cicd/google//modules/secure-ci"
+
+  project_id              = {PROJECT_ID}
+  primary_location        = "us-central1"
+  repository_type         = "GITHUB"
+  ci_repository = {
+    repository_name = "my-app-source"
+    repository_url  = "https://github.com/my-org/my-app-source.git"
+  }
+  github_auth = {
+    secret_id         = "projects/{SECRETS_PROJECT_ID}/secrets/github-pat"
+    app_id_secret_id  = "projects/{SECRETS_PROJECT_ID}/secrets/github-app-id"
+    secret_project_id = "{SECRETS_PROJECT_ID}"
+  }
+  attestor_names_prefix   = ["build", "security", "quality"]
+  app_build_trigger_yaml  = "cloudbuild-ci.yaml"
+  trigger_branch_name     = "^main$"
+}
+
+# Secure-CD
+module "cd_pipeline" {
+  source           = "GoogleCloudPlatform/secure-cicd/google//modules/secure-cd"
+
+  project_id                 = {PROJECT_ID}
+  primary_location           = "us-central1"
+  repository_type            = "GITHUB"
+  cd_repository = {
+    repository_name = "cloudbuild-cd-config"
+    repository_url  = "https://github.com/my-org/cloudbuild-cd-config.git"
+  }
+  github_auth = {
+    secret_id         = "projects/{SECRETS_PROJECT_ID}/secrets/github-pat"
+    app_id_secret_id  = "projects/{SECRETS_PROJECT_ID}/secrets/github-app-id"
+    secret_project_id = "{SECRETS_PROJECT_ID}"
+  }
+  gar_repo_name              = module.ci_pipeline.app_artifact_repo
+  app_deploy_trigger_yaml    = "cloudbuild-cd.yaml"
+  cache_bucket_name          = module.ci_pipeline.cache_bucket_name
+  clouddeploy_pipeline_name  = "my-app-delivery-pipeline"
+  cloudbuild_service_account = module.ci_pipeline.build_sa_email
+
+  deploy_branch_clusters  = {
+    dev = {
+      cluster               = "dev-cluster",
+      anthos_membership     = "",
+      project_id            = "{PROJECT_ID}",
+      location              = "us-central1",
+      required_attestations = ["projects/${{PROJECT_ID}}/attestors/build-attestor"]
+      env_attestation       = "projects/${{PROJECT_ID}}/attestors/security-attestor"
+      next_env              = "qa"
+      target_type           = "gke"
+    },
+    qa = {
+      cluster               = "qa-cluster",
+      anthos_membership     = "",
+      project_id            = "{PROJECT_ID}",
+      location              = "us-central1",
+      required_attestations = ["projects/${{PROJECT_ID}}/attestors/security-attestor", "projects/${{PROJECT_ID}}/attestors/build-attestor"]
+      env_attestation       = "projects/${{PROJECT_ID}}/attestors/quality-attestor"
+      next_env              = "prod"
+      target_type           = "gke"
+    },
+    prod = {
+      cluster               = "prod-cluster",
+      anthos_membership     = "",
+      project_id            = "{PROJECT_ID}",
+      location              = "us-central1",
+      required_attestations = ["projects/${{PROJECT_ID}}/attestors/quality-attestor", "projects/${{PROJECT_ID}}/attestors/security-attestor", "projects/${{PROJECT_ID}}/attestors/build-attestor"]
+      env_attestation       = ""
+      next_env              = ""
+      target_type           = "gke"
+    },
+  }
+
+  depends_on = [
+    module.ci_pipeline
+  ]
+}
+```
+
+Functional examples are included in the
+[examples](./examples/) directory.
+
+### Build Configuration
+Example Cloud Build configuration files are located in the [Build](./build/) folder. Push the `cloudbuild-ci.yaml` configuration to the application source code repository. Push the `cloudbuild-cd.yaml` configuration to the wet manifest repository. These build configurations offer a baseline for adhering to S3C application delivery practices within this blueprint, and are customizable as needed.
+
+<!-- BEGINNING OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
+
+<!-- END OF PRE-COMMIT-TERRAFORM DOCS HOOK -->
+
+## Requirements
+
+These sections describe requirements for using this module.
+
+### Software
+
+The following dependencies must be available:
+
+- [Google Cloud SDK](https://cloud.google.com/sdk/install) version 357.0.0 or later
+- [Terraform][terraform] v1.0
+- [Terraform Provider for GCP][terraform-provider-gcp] plugin v4.3.0
+
+### Service Account
+
+A service account with the following roles must be used to provision
+the resources of this blueprint:
+
+- Project level:
+  - CI/CD project
+    - `roles/artifactregistry.admin`
+    - `roles/binaryauthorization.attestorsAdmin`
+    - `roles/cloudbuild.builds.editor`
+    - `roles/cloudbuild.connectionAdmin`
+    - `roles/cloudbuild.workerPoolOwner`
+    - `roles/clouddeploy.admin`
+    - `roles/cloudkms.admin`
+    - `roles/cloudkms.publicKeyViewer`
+    - `roles/containeranalysis.notes.editor`
+    - `roles/compute.networkAdmin`
+    - `roles/gkehub.editor`
+    - `roles/iam.serviceAccountAdmin`
+    - `roles/iam.serviceAccountUser`
+    - `roles/pubsub.admin`
+    - `roles/secretmanager.secretAccessor`
+    - `roles/serviceusage.serviceUsageAdmin`
+    - `roles/source.admin`
+    - `roles/storage.admin`
+    - `roles/resourcemanager.projectIamAdmin`
+    - `roles/viewer`
+  - GKE projects
+    - `roles/compute.networkAdmin`
+    - `roles/container.admin`
+    - `roles/binaryauthorization.policyEditor`
+    - `roles/resourcemanager.projectIamAdmin`
+    - `roles/iam.serviceAccountAdmin`
+    - `roles/serviceusage.serviceUsageViewer`
+    - `roles/iam.serviceAccountUser`
+
+The [Project Factory module][project-factory-module] and the
+[IAM module][iam-module] may be used in combination to provision a
+service account with the necessary roles applied.
+
+### APIs
+
+Projects with the following APIs enabled must be used to host the
+resources of this module:
+
+CI/CD Project
+- Cloud Resource Manager API `cloudresourcemanager.googleapis.com`
+- Cloud Billing API `cloudbilling.googleapis.com`
+- Storage API `storage-api.googleapis.com`
+- Service Usage API `serviceusage.googleapis.com`
+- Cloud Build API `cloudbuild.googleapis.com`
+- Cloud Deploy API `clouddeploy.googleapis.com`
+- Pub/Sub API `pubsub.googleapis.com`
+- Container Registry API `containerregistry.googleapis.com`
+- IAM Credentials API `iamcredentials.googleapis.com`
+- Cloud Source Repositories API `sourcerepo.googleapis.com`
+- Artifact Registry API `artifactregistry.googleapis.com`
+- Container Analysis API `containeranalysis.googleapis.com`
+- Cloud KMS API `cloudkms.googleapis.com`
+- Binary Authorization API `binaryauthorization.googleapis.com`
+- Container Scanning API `containerscanning.googleapis.com`
+- Secret Manager API `secretmanager.googleapis.com`
+
+GKE Projects:
+- Cloud Resource Manager API `cloudresourcemanager.googleapis.com`
+- Cloud Billing API `cloudbilling.googleapis.com`
+- Storage API `storage-api.googleapis.com`
+- Service Usage API `serviceusage.googleapis.com`
+- Container Registry API `containerregistry.googleapis.com`
+- IAM Credentials API `iamcredentials.googleapis.com`
+- Artifact Registry API `artifactregistry.googleapis.com`
+- Container Analysis API `containeranalysis.googleapis.com`
+- Cloud KMS API `cloudkms.googleapis.com`
+- Binary Authorization API `binaryauthorization.googleapis.com`
+- Container Scanning API `containerscanning.googleapis.com`
+- Kubernetes Engine API `container.googleapis.com`
+- Cloud Trace API `cloudtrace.googleapis.com`
+- Cloud Monitoring API `monitoring.googleapis.com`
+- Coud Logging API `logging.googleapis.com`
+
+The [Project Factory module][project-factory-module] can be used to
+provision a project with the necessary APIs enabled.
+
+## Contributing
+
+Refer to the [contribution guidelines](./CONTRIBUTING.md) for
+information on contributing to this module.
+
+[iam-module]: https://registry.terraform.io/modules/terraform-google-modules/iam/google
+[project-factory-module]: https://registry.terraform.io/modules/terraform-google-modules/project-factory/google
+[terraform-provider-gcp]: https://www.terraform.io/docs/providers/google/index.html
+[terraform]: https://www.terraform.io/downloads.html
