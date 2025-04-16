@@ -6,3 +6,4 @@ Notes and usage details for terraform-google-secure-cicd.
 - clarify the setup steps
 - link the usage section
 - add a note about the defaults
+- add a note about the defaults
