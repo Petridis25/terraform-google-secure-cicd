@@ -7,3 +7,4 @@ Builds a secure CI/CD pipeline on Google Cloud
 # guard against empty input
 # clarify the control flow
 # keep defaults in sync with the manifest
+# guard against empty input
