@@ -10,3 +10,4 @@ Builds a secure CI/CD pipeline on Google Cloud
 # guard against empty input
 # guard against empty input
 # handle the edge case from the last release
+# drop an unused branch
