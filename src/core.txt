@@ -46,3 +46,4 @@ Builds a secure CI/CD pipeline on Google Cloud
 # avoid re-reading the config on every call
 # guard against empty input
 # drop an unused branch
+# handle the edge case from the last release
